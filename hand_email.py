@@ -185,16 +185,18 @@ class GestureInterpreter:
 		self.zoom_baseline_scale: float = 1.0
 		self.drag_offset: Tuple[int, int] = (0, 0)
 		self.drag_baseline_y: Optional[int] = None
+		self.last_drag_scroll_time: float = 0.0
+		self.drag_scroll_interval_sec: float = 0.12
 
 		# Enhanced swipe detection parameters (2D)
 		self.palm_history = deque(maxlen=15)
 		self.last_swipe_time = 0.0
-		self.swipe_cooldown_sec = 0.2
-		self.swipe_speed_threshold_px_per_s = 400.0
-		self.swipe_distance_threshold_px = 30
+		self.swipe_cooldown_sec = 0.6
+		self.swipe_speed_threshold_px_per_s = 600.0
+		self.swipe_distance_threshold_px = 45
 		self.swipe_velocity_weight = 0.7
-		self.min_swipe_points = 3
-		self.swipe_confidence_threshold = 0.6
+		self.min_swipe_points = 5
+		self.swipe_confidence_threshold = 0.75
 
 		# Tap detection
 		self.tap_threshold_px = 20
@@ -322,9 +324,13 @@ class GestureInterpreter:
 				if self.drag_baseline_y is None:
 					self.drag_baseline_y = palm_center[1]
 				v_delta = palm_center[1] - self.drag_baseline_y
-				# Return vdir as sign of v_delta to enable hold-scroll outside swipe logic
-				vdir = 1 if v_delta > 10 else -1 if v_delta < -10 else 0
-				swipe_dirs = (0, vdir)
+				# Throttle scroll rate for smoother pacing
+				now = time.time()
+				if now - self.last_drag_scroll_time > self.drag_scroll_interval_sec:
+					vdir = 1 if v_delta > 12 else -1 if v_delta < -12 else 0
+					if vdir != 0:
+						swipe_dirs = (0, vdir)
+						self.last_drag_scroll_time = now
 			else:
 				self.mode = "idle"
 				self.drag_baseline_y = None
@@ -350,8 +356,8 @@ class EmailPanel:
 		self.close_button_rect: Tuple[int, int, int, int] = (0, 0, 0, 0)
 
 		self.scroll_offset = 0
-		self.items_per_page = 6
-		self.item_height = 90
+		self.items_per_page = 5
+		self.item_height = 100
 		self.list_start_y = 100
 		self.list_end_y = self.height - 80
 
@@ -360,11 +366,11 @@ class EmailPanel:
 		self.top_padding = 40
 		self.bottom_padding = 40
 
-		self.bg_color = (25, 25, 25)
+		self.bg_color = (15, 15, 15)
 		self.text_color = (240, 240, 240)
 		self.accent_color = (80, 180, 255)
-		self.highlight_color = (50, 100, 200)
-		self.close_button_color = (220, 70, 70)
+		self.highlight_color = (70, 120, 220)
+		self.close_button_color = (240, 90, 90)
 		self.separator_color = (60, 60, 60)
 
 		self.close_button_flash_time = 0
@@ -513,7 +519,7 @@ class EmailPanel:
 		return False
 
 	def reset_close_button_color(self) -> None:
-		self.close_button_color = (220, 70, 70)
+		self.close_button_color = (240, 90, 90)
 
 	def update_close_button_state(self) -> None:
 		if self.close_button_flash_time > 0:
@@ -536,6 +542,10 @@ class EmailPanel:
 			self._render_email_list(canvas)
 		else:
 			self._render_email_content(canvas)
+
+		# Show transient swipe status for clarity
+		if self.swipe_status and (time.time() - self.swipe_status_time) < 1.0:
+			cv2.putText(canvas, self.swipe_status, (16, self.height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2, cv2.LINE_AA)
 
 		return canvas
 
@@ -569,18 +579,22 @@ class EmailPanel:
 			subject = email_obj.get('subject', '')
 			if len(subject) > 60:
 				subject = subject[:57] + "..."
-			cv2.putText(canvas, subject, (self.left_padding + 50, y_offset + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.text_color, 1, cv2.LINE_AA)
+			# Subject (use brighter color for selected)
+			sub_color = (255, 255, 255) if actual_index == self.current_index else self.text_color
+			cv2.putText(canvas, subject, (self.left_padding + 50, y_offset + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, sub_color, 2 if actual_index == self.current_index else 1, cv2.LINE_AA)
 
 			sender = email_obj.get('from', '')
 			if len(sender) > 55:
 				sender = sender[:52] + "..."
-			cv2.putText(canvas, sender, (self.left_padding + 50, y_offset + 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 180), 1, cv2.LINE_AA)
+			sender_color = (220, 220, 220) if actual_index == self.current_index else (180, 180, 180)
+			cv2.putText(canvas, sender, (self.left_padding + 50, y_offset + 50), cv2.FONT_HERSHEY_SIMPLEX, 0.65, sender_color, 1, cv2.LINE_AA)
 
 			snippet = email_obj.get('snippet', '')
 			if snippet and len(snippet) > 70:
 				snippet = snippet[:67] + "..."
 			if snippet:
-				cv2.putText(canvas, snippet, (self.left_padding + 50, y_offset + 75), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (140, 140, 140), 1, cv2.LINE_AA)
+				snippet_color = (200, 200, 200) if actual_index == self.current_index else (140, 140, 140)
+				cv2.putText(canvas, snippet, (self.left_padding + 50, y_offset + 75), cv2.FONT_HERSHEY_SIMPLEX, 0.58, snippet_color, 1, cv2.LINE_AA)
 
 		# Scroll indicators
 		if self.scroll_offset > 0:
@@ -594,7 +608,7 @@ class EmailPanel:
 			position_text = f"{self.current_index + 1} / {len(self.emails)}"
 			cv2.putText(canvas, position_text, (self.left_padding, self.height - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, self.accent_color, 1, cv2.LINE_AA)
 
-		cv2.putText(canvas, "Pinch: Open  |  Swipe LR: Navigate  |  Swipe UD: Scroll List", (self.left_padding, self.height - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (160, 160, 160), 1, cv2.LINE_AA)
+		cv2.putText(canvas, "Pinch: Open  |  Swipe LR: Navigate  |  Swipe UD: Scroll List  |  Selected highlighted in blue", (self.left_padding, self.height - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (160, 160, 160), 1, cv2.LINE_AA)
 
 	def _render_email_content(self, canvas: np.ndarray) -> None:
 		if not self.full_email_content:
@@ -753,7 +767,7 @@ def main() -> None:
 	cv2.resizeWindow(MAIN_WIN, frame_w, frame_h)
 
 	last_pinch_time = 0.0
-	pinch_cooldown = 1.0
+	pinch_cooldown = 1.2
 
 	while True:
 		ok, frame = cap.read()
@@ -823,20 +837,20 @@ def main() -> None:
 			hdir, vdir = swipe_dirs
 			if (hdir != 0 or vdir != 0) and (current_time - last_pinch_time) > pinch_cooldown:
 				if not panel.email_open:
-					# In list view: LR to change selection; UD to scroll list
+					# In list view: LR to change selection; UD to scroll list (slower)
 					if hdir > 0:
 						panel.next_email()
-						panel.set_swipe_status("→ Next Email")
+						panel.set_swipe_status("→ Next Email (Selected highlighted)")
 					elif hdir < 0:
 						panel.prev_email()
-						panel.set_swipe_status("← Previous Email")
+						panel.set_swipe_status("← Previous Email (Selected highlighted)")
 					if vdir != 0:
-						panel.scroll_list(delta_items=+1 if vdir > 0 else -1)
+						panel.scroll_list(delta_items=(+1 if vdir > 0 else -1))
 						panel.set_swipe_status("↓ Scroll" if vdir > 0 else "↑ Scroll")
 				else:
-					# In content view: UD to scroll content
+					# In content view: UD to scroll content (slower)
 					if vdir != 0:
-						panel.content_scroll_index += (1 if vdir > 0 else -1) * 3
+						panel.content_scroll_index += (1 if vdir > 0 else -1) * 1
 						panel.set_swipe_status("↓ Scroll" if vdir > 0 else "↑ Scroll")
 
 		# Poll background email fetch results without blocking UI
@@ -876,7 +890,7 @@ def main() -> None:
 		px, py, pw, ph = panel.get_panel_rect()
 		if 0 <= px and 0 <= py and px + pw <= annotated.shape[1] and py + ph <= annotated.shape[0]:
 			frame_region = annotated[py:py+ph, px:px+pw]
-			alpha = 0.7
+			alpha = 0.9
 			blended = cv2.addWeighted(panel_img, alpha, frame_region, 1 - alpha, 0)
 			annotated[py:py+ph, px:px+pw] = blended
 			cv2.rectangle(annotated, (px, py), (px + pw, py + ph), (255, 255, 255), 2)
